@@ -1,0 +1,16 @@
+# libraries
+numpy
+pandas
+matplotlib
+transformers
+requests
+python-dotenv
+boto3
+s3fs
+dask
+torch
+torchvision
+impresso-commons
+protobuf
+tiktoken
+sentencepiece
