@@ -1,0 +1,4 @@
+{
+    "libraries": ["BNL", "BNF", "BNF-EN"],
+    "s3_bucket_name": "12-canonical-final"
+}
