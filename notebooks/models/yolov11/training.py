@@ -2,11 +2,14 @@ import os
 import torch
 # torch.cuda.empty_cache()
 print(torch.cuda.is_available())
+CUDA_VISIBLE_DEVICES=0
+
 from torch.utils.data import DataLoader
 import torchvision
-print("issaved")
 
 import pytorch_lightning as pl
+from lightning.pytorch.loggers import CSVLogger
+
 
 from pycocotools.coco import COCO # to verify that the annotations are correct
 
@@ -846,7 +849,9 @@ class YoloS(pl.LightningModule):
         self.coco_evaluator = CocoEvaluator(base_ds, ['bbox'])
         self.validation_outputs = []  # to store validation outputs
         self.step_train_losses = []  # To store losses for the last 500 steps
+        self.step_validation_losses = []  # To store losses for the last 500 steps
         self.log_at_step_nb = log_at_step_nb
+
         
         """
         # freeze the backbone layers
@@ -873,9 +878,9 @@ class YoloS(pl.LightningModule):
         #"""
         
         # verify that backbone parameters are frozen
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                print(f"Frozen: {name}")
+        # for name, param in model.named_parameters():
+            # if not param.requires_grad:
+                # print(f"Frozen: {name}")
             
         print("Frozen the embeddings, encoder, and layer normalization of ViT.")
 
@@ -894,7 +899,8 @@ class YoloS(pl.LightningModule):
         loss, loss_dict = self.common_step(batch, batch_idx)
         # logs metrics for each training_step,
         # and the average across the epoch
-        self.log("train/loss", loss, on_epoch=True) # logging metrics with a forward slash will ensure the train and validation metrics as split into 2 separate sections in the W&B workspace
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        # self.log("train/loss", loss, on_epoch=True) # logging metrics with a forward slash will ensure the train and validation metrics as split into 2 separate sections in the W&B workspace
         for k, v in loss_dict.items():
             self.log(f"train/{k}", v.item(), on_epoch=True)
             
@@ -909,28 +915,38 @@ class YoloS(pl.LightningModule):
         
         return loss
     
+    """
+    def validation_step(self, batch, batch_idx):
+
+        loss, loss_dict = self.common_step(batch, batch_idx)
+        # self.log("validation/loss", loss, on_epoch=True)
+        self.log("validation_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        for k, v in loss_dict.items():
+            self.log(f"validation/{k}", v.item(), on_epoch=True)
+        return loss
+    """
+    
     def validation_step(self, batch, batch_idx):
         loss, loss_dict = self.common_step(batch, batch_idx)
+        
+        # Log validation loss (tracked separately from training loss)
         self.log("validation/loss", loss, on_epoch=True)
         for k, v in loss_dict.items():
             self.log(f"validation/{k}", v.item(), on_epoch=True)
-        self.validation_outputs.append(batch)
-        return loss
-    
-        # return {"val_loss": loss.item()}  # Return the loss for aggregation
-        """
-        for k, v in loss_dict.items():
-            self.log(f"validation/{k}", v.item(), on_epoch=True)
-        self.validation_outputs.append(batch)
-        
-        # print validation loss every 500 steps
-        if (batch_idx + 1) % 500 == 0:
-            print(f"Step {batch_idx + 1}: Validation Loss: {loss.item():.4f}")
             
-        return loss  # Returning loss is sufficient for logging
-        """
+        # Store the batch loss
+        self.step_validation_losses.append(loss.item())
         
+        # Print average loss every x steps (self.log_at_step_nb)
+        if (batch_idx + 1) % self.log_at_step_nb == 0:
+            avg_loss = sum(self.step_validation_losses[-self.log_at_step_nb:]) / min(len(self.step_validation_losses), self.log_at_step_nb)
+            print(f"Step {batch_idx + 1}: Average Validation Loss (last {self.log_at_step_nb} steps) = {avg_loss:.4f}")
+
+        return loss
+        
+    """
     def on_validation_epoch_end(self):
+        print("ON !!!!!!!!!!")
         self.model.eval()
         device = self.device
         
@@ -965,13 +981,14 @@ class YoloS(pl.LightningModule):
         # Clear outputs after evaluation
         self.validation_outputs.clear()
         self.model.train()
+    """
         
     def on_train_epoch_end(self):
         # log and save training loss
-        epoch_loss = self.trainer.logged_metrics.get("train/loss_epoch", None)
+        epoch_loss = self.trainer.logged_metrics.get("train_loss_epoch", None)
         if epoch_loss is not None:
             self.train_losses.append(epoch_loss.item())
-            self.log("train/loss_epoch_manual", epoch_loss)
+            self.log("train_loss_epoch_manual", epoch_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             
             # print the epoch-level average train loss
             print(f"Epoch {self.current_epoch + 1}: Train Loss (average for epoch) = {epoch_loss.item():.4f}")
@@ -987,20 +1004,26 @@ class YoloS(pl.LightningModule):
     
 from pytorch_lightning.callbacks import ModelCheckpoint
 
+csv_logger = CSVLogger("logs/", name="Yolo_small_frozen")
+
 # Define the checkpoint callback
 checkpoint_callback = ModelCheckpoint(
-    dirpath="/scratch/students/danae/data/model_data_format/yolo/checkpoints_yolov11",  # Directory to save the checkpoints
-    filename="yolov11-{epoch:02d}-{train_loss:.2f}",  # Name of the saved file
-    save_top_k=-1,  # Save all checkpoints (default is 1, which saves the best)
+    dirpath="checkpoints/",
+    filename="model-yolo-small-fronzen-{step:06d}",
+    every_n_train_steps=500,  # Saves every 500 steps
+    save_top_k=-1,  # Save all checkpoints
     save_weights_only=False,  # Save not only the model weights
-    every_n_epochs=1,  # Save at every epoch
+    verbose=True
 )
 
-log_at_step_nb = 10
+log_at_step_nb = 500
 
-trainer = pl.Trainer(max_epochs=20,
-                     val_check_interval=log_at_step_nb,
-                     callbacks=[checkpoint_callback])
+trainer = pl.Trainer(
+    max_steps=10000,
+    callbacks=[checkpoint_callback],
+    val_check_interval=log_at_step_nb,
+    logger=csv_logger
+)
 
 model = AutoModelForObjectDetection.from_pretrained(
     "hustvl/yolos-small", 
